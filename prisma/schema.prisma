@@ -1,0 +1,320 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// SERVICES & LOCATIONS
+// ============================================
+
+model Service {
+  id               String   @id @default(uuid())
+  name             String   // "Commercial Roofing"
+  slug             String   @unique // "commercial-roofing"
+  description      String?
+  baseLeadPrice    Decimal  @map("base_lead_price") @db.Decimal(10, 2) // $300.00
+  active           Boolean  @default(true)
+  
+  // SEO & Content
+  metaTitle        String?  @map("meta_title")
+  metaDescription  String?  @map("meta_description")
+  heroTitle        String?  @map("hero_title")
+  heroSubtitle     String?  @map("hero_subtitle")
+  
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  serviceAreas     ServiceArea[]
+  contractors      Contractor[]
+  leads            Lead[]
+
+  @@map("services")
+}
+
+model ServiceArea {
+  id        String   @id @default(uuid())
+  name      String   // "Dallas"
+  slug      String   // "dallas"
+  state     String   // "TX"
+  zipCodes  String[] @map("zip_codes") // Array of zip codes
+  active    Boolean  @default(true)
+  
+  serviceId String   @map("service_id")
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  leads     Lead[]
+  distributionRules DistributionRule[]
+
+  @@unique([serviceId, slug])
+  @@map("service_areas")
+}
+
+// ============================================
+// CONTRACTORS (Your Clients)
+// ============================================
+
+model Contractor {
+  id                String   @id @default(uuid())
+  
+  // Company Info
+  companyName       String   @map("company_name")
+  contactName       String   @map("contact_name")
+  email             String   @unique
+  phone             String?
+  website           String?
+  
+  // Service Info
+  serviceId         String   @map("service_id")
+  service           Service  @relation(fields: [serviceId], references: [id])
+  serviceAreaIds    String[] @map("service_area_ids") // Array of service area IDs
+  
+  // Billing
+  stripeCustomerId  String?  @unique @map("stripe_customer_id")
+  paymentMethodId   String?  @map("payment_method_id")
+  billingEmail      String?  @map("billing_email")
+  autoBilling       Boolean  @default(true) @map("auto_billing")
+  
+  // Settings
+  leadPrice         Decimal  @map("lead_price") @db.Decimal(10, 2) // Custom price
+  maxLeadsPerMonth  Int?     @map("max_leads_per_month") // NULL = unlimited
+  
+  // Status
+  active            Boolean  @default(true)
+  verified          Boolean  @default(false)
+  
+  // Auth
+  passwordHash      String   @map("password_hash")
+  emailVerified     Boolean  @default(false) @map("email_verified")
+  verificationToken String?  @map("verification_token")
+  resetToken        String?  @map("reset_token")
+  resetTokenExpiry  DateTime? @map("reset_token_expiry")
+  
+  // Notifications
+  notifySms         Boolean  @default(true) @map("notify_sms")
+  notifyEmail       Boolean  @default(true) @map("notify_email")
+  webhookUrl        String?  @map("webhook_url")
+  webhookSecret     String?  @map("webhook_secret")
+  
+  // Metadata
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  lastLogin         DateTime? @map("last_login")
+
+  // Relations
+  leads             Lead[]
+  invoices          Invoice[]
+  distributionRules DistributionRule[]
+  activities        Activity[]
+
+  @@index([serviceId])
+  @@index([active])
+  @@index([email])
+  @@map("contractors")
+}
+
+// ============================================
+// LEADS (The Money)
+// ============================================
+
+model Lead {
+  id              String   @id @default(uuid())
+  
+  // Contact Info
+  name            String
+  companyName     String?  @map("company_name")
+  email           String?
+  phone           String
+  city            String?
+  state           String?
+  zipCode         String?  @map("zip_code")
+  
+  // Service Details
+  serviceId       String   @map("service_id")
+  service         Service  @relation(fields: [serviceId], references: [id])
+  
+  serviceAreaId   String?  @map("service_area_id")
+  serviceArea     ServiceArea? @relation(fields: [serviceAreaId], references: [id])
+  
+  serviceType     String?  @map("service_type") // "roof repair", "flat roofing"
+  projectTimeline String?  @map("project_timeline") // "ASAP", "Within 1 week"
+  projectDetails  String?  @map("project_details")
+  estimatedBudget String?  @map("estimated_budget")
+  
+  // Assignment
+  contractorId    String?  @map("contractor_id")
+  contractor      Contractor? @relation(fields: [contractorId], references: [id])
+  assignedAt      DateTime? @map("assigned_at")
+  
+  // Status
+  status          String   @default("new") // new, assigned, contacted, won, lost, refunded
+  qualityScore    Int?     @map("quality_score") // 1-10
+  contractorFeedback String? @map("contractor_feedback")
+  
+  // Source Tracking
+  sourceUrl       String?  @map("source_url")
+  utmSource       String?  @map("utm_source")
+  utmMedium       String?  @map("utm_medium")
+  utmCampaign     String?  @map("utm_campaign")
+  gclid           String?  // Google Ads click ID
+  
+  // GoHighLevel
+  ghlContactId    String?  @map("ghl_contact_id")
+  ghlOpportunityId String? @map("ghl_opportunity_id")
+  
+  // Technical
+  ipAddress       String?  @map("ip_address")
+  userAgent       String?  @map("user_agent")
+  
+  // Metadata
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  activities      Activity[]
+  invoiceItems    InvoiceItem[]
+
+  @@index([contractorId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([serviceId, serviceAreaId])
+  @@map("leads")
+}
+
+// ============================================
+// LEAD DISTRIBUTION
+// ============================================
+
+model DistributionRule {
+  id              String   @id @default(uuid())
+  
+  contractorId    String   @map("contractor_id")
+  contractor      Contractor @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  
+  serviceAreaId   String   @map("service_area_id")
+  serviceArea     ServiceArea @relation(fields: [serviceAreaId], references: [id], onDelete: Cascade)
+  
+  // Rules
+  priority        Int      @default(0) // Higher = first to get leads
+  active          Boolean  @default(true)
+  
+  // Schedule (JSON: {"monday": "9-17", "tuesday": "9-17"})
+  scheduleJson    Json?    @map("schedule_json")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([contractorId, serviceAreaId])
+  @@index([contractorId])
+  @@index([serviceAreaId])
+  @@map("distribution_rules")
+}
+
+// ============================================
+// BILLING
+// ============================================
+
+model Invoice {
+  id              String   @id @default(uuid())
+  
+  contractorId    String   @map("contractor_id")
+  contractor      Contractor @relation(fields: [contractorId], references: [id])
+  
+  // Period
+  periodStart     DateTime @map("period_start")
+  periodEnd       DateTime @map("period_end")
+  
+  // Amounts
+  totalLeads      Int      @map("total_leads")
+  amount          Decimal  @db.Decimal(10, 2)
+  
+  // Payment
+  status          String   @default("pending") // pending, paid, failed, refunded
+  stripeInvoiceId String?  @unique @map("stripe_invoice_id")
+  stripeChargeId  String?  @map("stripe_charge_id")
+  paidAt          DateTime? @map("paid_at")
+  
+  // Metadata
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  items           InvoiceItem[]
+
+  @@index([contractorId])
+  @@index([status])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  
+  invoiceId   String   @map("invoice_id")
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  leadId      String   @map("lead_id")
+  lead        Lead     @relation(fields: [leadId], references: [id])
+  
+  description String
+  amount      Decimal  @db.Decimal(10, 2)
+  
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([invoiceId])
+  @@index([leadId])
+  @@map("invoice_items")
+}
+
+// ============================================
+// ACTIVITY LOG
+// ============================================
+
+model Activity {
+  id            String   @id @default(uuid())
+  
+  // What happened
+  type          String   // "lead.created", "lead.assigned", "contractor.login"
+  description   String
+  metadata      Json?    // Additional data
+  
+  // Related entities
+  leadId        String?  @map("lead_id")
+  lead          Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  
+  contractorId  String?  @map("contractor_id")
+  contractor    Contractor? @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  
+  // Who did it
+  actorType     String   @map("actor_type") // "system", "contractor", "admin"
+  actorId       String?  @map("actor_id")
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([leadId])
+  @@index([contractorId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("activities")
+}
+
+// ============================================
+// SYSTEM SETTINGS
+// ============================================
+
+model Setting {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("settings")
+}
