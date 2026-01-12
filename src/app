@@ -1,0 +1,203 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { prisma } from '@/lib/prisma';
+import { ghlClient } from '@/lib/ghl';
+import { distributeLeadToContractor, calculateQualityScore } from '@/lib/distribution';
+import { notifyLeadReceived } from '@/lib/twilio';
+
+// Validation schema
+const leadSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters'),
+  companyName: z.string().optional(),
+  email: z.string().email('Invalid email').optional().or(z.literal('')),
+  phone: z.string().min(10, 'Phone number required'),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  serviceType: z.string().optional(),
+  projectTimeline: z.string().optional(),
+  projectDetails: z.string().optional(),
+  estimatedBudget: z.string().optional(),
+  
+  // Hidden fields for tracking
+  serviceId: z.string().uuid('Invalid service ID'),
+  serviceAreaId: z.string().uuid().optional(),
+  sourceUrl: z.string().url().optional(),
+  utmSource: z.string().optional(),
+  utmMedium: z.string().optional(),
+  utmCampaign: z.string().optional(),
+  gclid: z.string().optional(),
+});
+
+export async function POST(request: NextRequest) {
+  try {
+    // Parse and validate request body
+    const body = await request.json();
+    const validatedData = leadSchema.parse(body);
+
+    // Get client IP and user agent
+    const ipAddress = request.headers.get('x-forwarded-for') || 
+                      request.headers.get('x-real-ip') || 
+                      'unknown';
+    const userAgent = request.headers.get('user-agent') || 'unknown';
+
+    // Calculate quality score
+    const qualityScore = calculateQualityScore(validatedData);
+
+    // Create lead in database
+    const lead = await prisma.lead.create({
+      data: {
+        name: validatedData.name,
+        companyName: validatedData.companyName,
+        email: validatedData.email || null,
+        phone: validatedData.phone,
+        city: validatedData.city,
+        state: validatedData.state,
+        zipCode: validatedData.zipCode,
+        serviceId: validatedData.serviceId,
+        serviceAreaId: validatedData.serviceAreaId,
+        serviceType: validatedData.serviceType,
+        projectTimeline: validatedData.projectTimeline,
+        projectDetails: validatedData.projectDetails,
+        estimatedBudget: validatedData.estimatedBudget,
+        sourceUrl: validatedData.sourceUrl,
+        utmSource: validatedData.utmSource,
+        utmMedium: validatedData.utmMedium,
+        utmCampaign: validatedData.utmCampaign,
+        gclid: validatedData.gclid,
+        qualityScore,
+        status: 'new',
+        ipAddress,
+        userAgent,
+      },
+      include: {
+        service: true,
+      },
+    });
+
+    // Log activity
+    await prisma.activity.create({
+      data: {
+        leadId: lead.id,
+        type: 'lead_created',
+        description: `New lead created: ${lead.name}`,
+        metadata: {
+          qualityScore,
+          source: validatedData.utmSource || 'direct',
+        },
+        actorType: 'system',
+      },
+    });
+
+    // Create contact in GoHighLevel (async, don't block response)
+    if (process.env.ENABLE_GHL_SYNC === 'true') {
+      createGHLContact(lead).catch(err => {
+        console.error('Error creating GHL contact:', err);
+      });
+    }
+
+    // Distribute lead to contractor (async, don't block response)
+    distributeLeadToContractor(lead.id).catch(err => {
+      console.error('Error distributing lead:', err);
+    });
+
+    // Send confirmation SMS to lead (async, don't block response)
+    if (process.env.ENABLE_SMS_NOTIFICATIONS === 'true') {
+      notifyLeadReceived(
+        lead.phone,
+        lead.name,
+        lead.service?.name || 'service'
+      ).catch(err => {
+        console.error('Error sending lead confirmation:', err);
+      });
+    }
+
+    // Return success response
+    return NextResponse.json({
+      success: true,
+      message: 'Your request has been received. A contractor will contact you within 24 hours.',
+      data: {
+        id: lead.id,
+        qualityScore: lead.qualityScore,
+      },
+    }, { status: 201 });
+
+  } catch (error: any) {
+    console.error('Lead creation error:', error);
+
+    // Handle validation errors
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid form data',
+          details: error.errors,
+        },
+      }, { status: 400 });
+    }
+
+    // Handle other errors
+    return NextResponse.json({
+      success: false,
+      error: {
+        code: 'SERVER_ERROR',
+        message: 'Failed to submit request. Please try again.',
+      },
+    }, { status: 500 });
+  }
+}
+
+/**
+ * Create contact in GoHighLevel
+ */
+async function createGHLContact(lead: any) {
+  const [firstName, ...lastNameParts] = lead.name.split(' ');
+  const lastName = lastNameParts.join(' ');
+
+  const result = await ghlClient.createContact({
+    firstName,
+    lastName,
+    email: lead.email || undefined,
+    phone: lead.phone,
+    source: lead.sourceUrl || 'Website Form',
+    tags: [
+      'Lead',
+      lead.service?.slug || 'unknown-service',
+      `Quality: ${lead.qualityScore}/10`,
+    ],
+    customField: {
+      service_type: lead.serviceType,
+      project_timeline: lead.projectTimeline,
+      project_details: lead.projectDetails,
+      estimated_budget: lead.estimatedBudget,
+      quality_score: lead.qualityScore,
+    },
+    address1: lead.city,
+    city: lead.city,
+    state: lead.state,
+    postalCode: lead.zipCode,
+  });
+
+  if (result.success && result.contactId) {
+    // Update lead with GHL contact ID
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        ghlContactId: result.contactId,
+      },
+    });
+  }
+}
+
+// CORS headers for lead submission
+export async function OPTIONS(request: NextRequest) {
+  return new NextResponse(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    },
+  });
+}
